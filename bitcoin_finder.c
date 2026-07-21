@@ -16,6 +16,7 @@ typedef struct {
     unsigned long *checked;
     unsigned long *found;
     pthread_mutex_t *mutex;
+    volatile int *found_complete;
 } thread_args_t;
 
 // Target public key hex
@@ -63,6 +64,31 @@ void generate_random_in_range(mpz_t result, mpz_t range_start, mpz_t range_end) 
     mpz_clear(range_size);
 }
 
+// Fonction pour sauvegarder le résultat dans BINGO.TXT
+void save_result(const char *privkey_hex, const char *pubkey_hex, int match_len) {
+    FILE *file = fopen("BINGO.TXT", "w");
+    if (file == NULL) {
+        perror("Erreur: impossible de créer BINGO.TXT");
+        return;
+    }
+    
+    fprintf(file, "========================================\n");
+    fprintf(file, "🎉 RÉSULTAT TROUVÉ!\n");
+    fprintf(file, "========================================\n");
+    fprintf(file, "Match Length: %d characters\n", match_len);
+    fprintf(file, "Private Key: %s\n", privkey_hex);
+    fprintf(file, "Public Key:  %s\n", pubkey_hex);
+    fprintf(file, "Target:      %s\n", TARGET_PUBKEY);
+    fprintf(file, "========================================\n");
+    fprintf(file, "Timestamp: ");
+    
+    time_t now = time(NULL);
+    fprintf(file, "%s", ctime(&now));
+    fprintf(file, "========================================\n");
+    
+    fclose(file);
+}
+
 void *search_thread(void *args) {
     thread_args_t *targs = (thread_args_t *)args;
     secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY | SECP256K1_CONTEXT_SIGN);
@@ -74,7 +100,7 @@ void *search_thread(void *args) {
     time_t start_time = time(NULL);
     
     // Recherche aléatoire infinie
-    while (1) {
+    while (!*targs->found_complete) {
         // Générer un nombre aléatoire dans la plage
         generate_random_in_range(current, targs->range_start, targs->range_end);
         
@@ -124,13 +150,22 @@ void *search_thread(void *args) {
                 
                 pthread_mutex_lock(targs->mutex);
                 (*targs->found)++;
+                
+                // Si c'est une correspondance COMPLÈTE (66 caractères)
+                if (match_len == 66) {
+                    printf("🎉🎉🎉 CORRESPONDANCE COMPLÈTE TROUVÉE! 🎉🎉🎉\n");
+                    save_result(privkey_hex, pubkey_hex, match_len);
+                    *targs->found_complete = 1;
+                    printf("\n✅ Résultat sauvegardé dans BINGO.TXT\n");
+                }
+                
                 pthread_mutex_unlock(targs->mutex);
             }
         }
         
         local_checked++;
         
-        if (local_checked % CHUNK_SIZE == 0) {
+        if (local_checked % CHUNK_SIZE == 0 && !*targs->found_complete) {
             pthread_mutex_lock(targs->mutex);
             *targs->checked += CHUNK_SIZE;
             time_t elapsed = time(NULL) - start_time;
@@ -176,6 +211,7 @@ int main() {
     pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     
     unsigned long checked = 0, found = 0;
+    volatile int found_complete = 0;
     
     // Create threads
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -186,6 +222,7 @@ int main() {
         args[i].checked = &checked;
         args[i].found = &found;
         args[i].mutex = &mutex;
+        args[i].found_complete = &found_complete;
         
         printf("Thread %d: Starting with random search in range\n", i);
         
@@ -202,10 +239,19 @@ int main() {
     time_t elapsed = time(NULL) - start;
     
     printf("\n========================================\n");
-    printf("🏁 Search Complete!\n");
+    
+    if (found_complete) {
+        printf("🎉 🎉 🎉  SUCCÈS! 🎉 🎉 🎉\n");
+        printf("========================================\n");
+        printf("La clé COMPLÈTE a été trouvée!\n");
+        printf("Les résultats ont été sauvegardés dans BINGO.TXT\n");
+    } else {
+        printf("🏁 Search Complete (interrupted)\n");
+    }
+    
     printf("========================================\n");
     printf("Total Keys Checked: %lu\n", checked);
-    printf("Total Matches Found: %lu\n", found);
+    printf("Total Matches Found (partial): %lu\n", found);
     if (elapsed > 0) {
         printf("Speed: %.0f keys/second\n", checked / (double)elapsed);
     }
