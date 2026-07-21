@@ -1,0 +1,17 @@
+[package]
+name = "bitcoin-key-finder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+secp256k1 = { version = "0.28", features = ["rand", "hashes"] }
+rayon = "1.8"
+hex = "0.4"
+num-bigint = "0.4"
+num_cpus = "1.16"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
