@@ -45,12 +45,14 @@ void *search_thread(void *args) {
     time_t start_time = time(NULL);
     
     while (mpz_cmp(current, targs->end) <= 0) {
-        // Convert mpz to bytes for secp256k1
+        // Convert mpz to bytes for secp256k1 (32 bytes = 256 bits)
         unsigned char privkey_bytes[32];
+        memset(privkey_bytes, 0, 32);
+        
         size_t count;
         mpz_export(privkey_bytes, &count, -1, 1, -1, 0, current);
         
-        // Pad with zeros if needed
+        // Pad with zeros if needed (big-endian)
         if (count < 32) {
             memmove(privkey_bytes + (32 - count), privkey_bytes, count);
             memset(privkey_bytes, 0, 32 - count);
@@ -123,13 +125,14 @@ int main() {
     printf("🔍 Bitcoin Key Finder - C with GMP & secp256k1\n");
     printf("========================================\n");
     printf("Target Public Key: %s\n", TARGET_PUBKEY);
+    printf("Range: 0x8000000000000000000000000000000000000000 to 0xffffffffffffffffffffffffffffffffffffffff\n");
     printf("Min Prefix Match: 5 characters\n");
     printf("Threads: %d\n", NUM_THREADS);
     printf("========================================\n\n");
     
     time_t start = time(NULL);
     
-    // Initialize range
+    // Initialize range - 160 bit Bitcoin private key range
     mpz_t range_start, range_end, range_size, chunk_size;
     mpz_init_set_str(range_start, "8000000000000000000000000000000000000000", 16);
     mpz_init_set_str(range_end, "ffffffffffffffffffffffffffffffffffffffff", 16);
@@ -138,6 +141,12 @@ int main() {
     
     mpz_sub(range_size, range_end, range_start);
     mpz_tdiv_q_ui(chunk_size, range_size, NUM_THREADS);
+    
+    printf("Range size: ");
+    mpz_out_str(stdout, 16, range_size);
+    printf("\nChunk per thread: ");
+    mpz_out_str(stdout, 16, chunk_size);
+    printf("\n\n");
     
     pthread_t threads[NUM_THREADS];
     thread_args_t args[NUM_THREADS];
@@ -150,6 +159,7 @@ int main() {
         mpz_init_set(args[i].start, range_start);
         mpz_init_set(args[i].end, range_end);
         
+        // Each thread gets: start + (i * chunk_size) to start + ((i+1) * chunk_size)
         mpz_addmul_ui(args[i].start, chunk_size, i);
         
         if (i == NUM_THREADS - 1) {
@@ -157,6 +167,7 @@ int main() {
             mpz_set(args[i].end, range_end);
         } else {
             mpz_add(args[i].end, args[i].start, chunk_size);
+            mpz_sub_ui(args[i].end, args[i].end, 1);
         }
         
         args[i].thread_id = i;
@@ -164,8 +175,16 @@ int main() {
         args[i].found = &found;
         args[i].mutex = &mutex;
         
+        printf("Thread %d range: ", i);
+        mpz_out_str(stdout, 16, args[i].start);
+        printf(" to ");
+        mpz_out_str(stdout, 16, args[i].end);
+        printf("\n");
+        
         pthread_create(&threads[i], NULL, search_thread, &args[i]);
     }
+    
+    printf("\n");
     
     // Wait for all threads
     for (int i = 0; i < NUM_THREADS; i++) {
