@@ -127,6 +127,12 @@ void *search_thread(void *args) {
             memset(privkey_bytes, 0, 32 - count);
         }
         
+        // VALIDATION STRICTE: vérifier que le premier byte >= 0x80
+        // Si ce n'est pas le cas, rejeter et recommencer
+        if (privkey_bytes[0] < 0x80) {
+            continue;
+        }
+        
         // Generate public key using secp256k1
         secp256k1_pubkey pubkey;
         if (secp256k1_ec_pubkey_create(ctx, &pubkey, privkey_bytes)) {
@@ -198,7 +204,7 @@ int main() {
     printf("========================================\n");
     printf("Target Public Key: %s\n", TARGET_PUBKEY);
     printf("Range: 0x8000000000000000000000000000000000000000 to 0xffffffffffffffffffffffffffffffffffffffff\n");
-    printf("Search Mode: COMPLETELY RANDOM (but respects range)\n");
+    printf("Search Mode: COMPLETELY RANDOM (respects range strictly)\n");
     printf("Min Prefix Match: 5 characters\n");
     printf("Threads: %d\n", NUM_THREADS);
     printf("========================================\n\n");
