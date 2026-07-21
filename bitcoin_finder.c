@@ -10,8 +10,8 @@
 #define CHUNK_SIZE 100000
 
 typedef struct {
-    mpz_t start;
-    mpz_t end;
+    mpz_t range_start;
+    mpz_t range_end;
     int thread_id;
     unsigned long *checked;
     unsigned long *found;
@@ -34,17 +34,50 @@ void bytes_to_hex(unsigned char *bytes, int len, char *hex) {
     hex[2*len] = '\0';
 }
 
+// Fonction pour générer un nombre aléatoire dans une plage
+void generate_random_in_range(mpz_t result, mpz_t range_start, mpz_t range_end) {
+    mpz_t range_size;
+    mpz_init(range_size);
+    
+    // Calculer la taille de la plage: range_end - range_start + 1
+    mpz_sub(range_size, range_end, range_start);
+    mpz_add_ui(range_size, range_size, 1);
+    
+    // Générer un nombre aléatoire jusqu'à la taille de la plage
+    mpz_t random;
+    mpz_init(random);
+    
+    // Utiliser /dev/urandom pour plus d'aléatoire
+    FILE *fp = fopen("/dev/urandom", "r");
+    unsigned char random_bytes[32];
+    fread(random_bytes, 1, 32, fp);
+    fclose(fp);
+    
+    mpz_import(random, 32, -1, 1, -1, 0, random_bytes);
+    mpz_mod(random, random, range_size);
+    
+    // result = range_start + random
+    mpz_add(result, range_start, random);
+    
+    mpz_clear(random);
+    mpz_clear(range_size);
+}
+
 void *search_thread(void *args) {
     thread_args_t *targs = (thread_args_t *)args;
     secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY | SECP256K1_CONTEXT_SIGN);
     
     mpz_t current;
-    mpz_init_set(current, targs->start);
+    mpz_init(current);
     
     unsigned long local_checked = 0;
     time_t start_time = time(NULL);
     
-    while (mpz_cmp(current, targs->end) <= 0) {
+    // Recherche aléatoire infinie
+    while (1) {
+        // Générer un nombre aléatoire dans la plage
+        generate_random_in_range(current, targs->range_start, targs->range_end);
+        
         // Convert mpz to bytes for secp256k1 (32 bytes = 256 bits)
         unsigned char privkey_bytes[32];
         memset(privkey_bytes, 0, 32);
@@ -108,13 +141,7 @@ void *search_thread(void *args) {
             }
             pthread_mutex_unlock(targs->mutex);
         }
-        
-        mpz_add_ui(current, current, 1);
     }
-    
-    pthread_mutex_lock(targs->mutex);
-    *targs->checked += (local_checked % CHUNK_SIZE);
-    pthread_mutex_unlock(targs->mutex);
     
     secp256k1_context_destroy(ctx);
     mpz_clear(current);
@@ -122,10 +149,11 @@ void *search_thread(void *args) {
 }
 
 int main() {
-    printf("🔍 Bitcoin Key Finder - C with GMP & secp256k1\n");
+    printf("🔍 Bitcoin Key Finder - C with GMP & secp256k1 (RANDOM SEARCH)\n");
     printf("========================================\n");
     printf("Target Public Key: %s\n", TARGET_PUBKEY);
     printf("Range: 0x8000000000000000000000000000000000000000 to 0xffffffffffffffffffffffffffffffffffffffff\n");
+    printf("Search Mode: COMPLETELY RANDOM\n");
     printf("Min Prefix Match: 5 characters\n");
     printf("Threads: %d\n", NUM_THREADS);
     printf("========================================\n\n");
@@ -133,19 +161,14 @@ int main() {
     time_t start = time(NULL);
     
     // Initialize range - 160 bit Bitcoin private key range
-    mpz_t range_start, range_end, range_size, chunk_size;
+    mpz_t range_start, range_end;
     mpz_init_set_str(range_start, "8000000000000000000000000000000000000000", 16);
     mpz_init_set_str(range_end, "ffffffffffffffffffffffffffffffffffffffff", 16);
-    mpz_init(range_size);
-    mpz_init(chunk_size);
     
-    mpz_sub(range_size, range_end, range_start);
-    mpz_tdiv_q_ui(chunk_size, range_size, NUM_THREADS);
-    
-    printf("Range size: ");
-    mpz_out_str(stdout, 16, range_size);
-    printf("\nChunk per thread: ");
-    mpz_out_str(stdout, 16, chunk_size);
+    printf("Range start: ");
+    mpz_out_str(stdout, 16, range_start);
+    printf("\nRange end:   ");
+    mpz_out_str(stdout, 16, range_end);
     printf("\n\n");
     
     pthread_t threads[NUM_THREADS];
@@ -156,30 +179,15 @@ int main() {
     
     // Create threads
     for (int i = 0; i < NUM_THREADS; i++) {
-        mpz_init_set(args[i].start, range_start);
-        mpz_init_set(args[i].end, range_end);
-        
-        // Each thread gets: start + (i * chunk_size) to start + ((i+1) * chunk_size)
-        mpz_addmul_ui(args[i].start, chunk_size, i);
-        
-        if (i == NUM_THREADS - 1) {
-            // Last thread goes to the end
-            mpz_set(args[i].end, range_end);
-        } else {
-            mpz_add(args[i].end, args[i].start, chunk_size);
-            mpz_sub_ui(args[i].end, args[i].end, 1);
-        }
+        mpz_init_set(args[i].range_start, range_start);
+        mpz_init_set(args[i].range_end, range_end);
         
         args[i].thread_id = i;
         args[i].checked = &checked;
         args[i].found = &found;
         args[i].mutex = &mutex;
         
-        printf("Thread %d range: ", i);
-        mpz_out_str(stdout, 16, args[i].start);
-        printf(" to ");
-        mpz_out_str(stdout, 16, args[i].end);
-        printf("\n");
+        printf("Thread %d: Starting with random search in range\n", i);
         
         pthread_create(&threads[i], NULL, search_thread, &args[i]);
     }
@@ -206,13 +214,11 @@ int main() {
     
     // Cleanup
     for (int i = 0; i < NUM_THREADS; i++) {
-        mpz_clear(args[i].start);
-        mpz_clear(args[i].end);
+        mpz_clear(args[i].range_start);
+        mpz_clear(args[i].range_end);
     }
     mpz_clear(range_start);
     mpz_clear(range_end);
-    mpz_clear(range_size);
-    mpz_clear(chunk_size);
     
     pthread_mutex_destroy(&mutex);
     
