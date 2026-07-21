@@ -35,35 +35,6 @@ void bytes_to_hex(unsigned char *bytes, int len, char *hex) {
     hex[2*len] = '\0';
 }
 
-// Fonction pour générer un nombre aléatoire dans une plage
-void generate_random_in_range(mpz_t result, mpz_t range_start, mpz_t range_end) {
-    mpz_t range_size;
-    mpz_init(range_size);
-    
-    // Calculer la taille de la plage: range_end - range_start + 1
-    mpz_sub(range_size, range_end, range_start);
-    mpz_add_ui(range_size, range_size, 1);
-    
-    // Générer un nombre aléatoire jusqu'à la taille de la plage
-    mpz_t random;
-    mpz_init(random);
-    
-    // Utiliser /dev/urandom pour plus d'aléatoire
-    FILE *fp = fopen("/dev/urandom", "r");
-    unsigned char random_bytes[32];
-    fread(random_bytes, 1, 32, fp);
-    fclose(fp);
-    
-    mpz_import(random, 32, -1, 1, -1, 0, random_bytes);
-    mpz_mod(random, random, range_size);
-    
-    // result = range_start + random
-    mpz_add(result, range_start, random);
-    
-    mpz_clear(random);
-    mpz_clear(range_size);
-}
-
 // Fonction pour sauvegarder le résultat dans BINGO.TXT
 void save_result(const char *privkey_hex, const char *pubkey_hex, int match_len) {
     FILE *file = fopen("BINGO.TXT", "w");
@@ -94,16 +65,13 @@ void *search_thread(void *args) {
     secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY | SECP256K1_CONTEXT_SIGN);
     
     mpz_t current;
-    mpz_init(current);
+    mpz_init_set(current, targs->range_start);
     
     unsigned long local_checked = 0;
     time_t start_time = time(NULL);
     
-    // Recherche aléatoire infinie
-    while (!*targs->found_complete) {
-        // Générer un nombre aléatoire dans la plage
-        generate_random_in_range(current, targs->range_start, targs->range_end);
-        
+    // Recherche séquentielle dans la plage assignée
+    while (mpz_cmp(current, targs->range_end) <= 0 && !*targs->found_complete) {
         // Convert mpz to bytes for secp256k1 (32 bytes = 256 bits)
         unsigned char privkey_bytes[32];
         memset(privkey_bytes, 0, 32);
@@ -163,6 +131,8 @@ void *search_thread(void *args) {
             }
         }
         
+        // Incrémenter pour la clé suivante
+        mpz_add_ui(current, current, 1);
         local_checked++;
         
         if (local_checked % CHUNK_SIZE == 0 && !*targs->found_complete) {
@@ -184,11 +154,11 @@ void *search_thread(void *args) {
 }
 
 int main() {
-    printf("🔍 Bitcoin Key Finder - C with GMP & secp256k1 (RANDOM SEARCH)\n");
+    printf("🔍 Bitcoin Key Finder - C with GMP & secp256k1 (SEQUENTIAL SEARCH)\n");
     printf("========================================\n");
     printf("Target Public Key: %s\n", TARGET_PUBKEY);
     printf("Range: 0x8000000000000000000000000000000000000000 to 0xffffffffffffffffffffffffffffffffffffffff\n");
-    printf("Search Mode: COMPLETELY RANDOM\n");
+    printf("Search Mode: SEQUENTIAL (range divided per thread)\n");
     printf("Min Prefix Match: 5 characters\n");
     printf("Threads: %d\n", NUM_THREADS);
     printf("========================================\n\n");
@@ -196,14 +166,29 @@ int main() {
     time_t start = time(NULL);
     
     // Initialize range - 160 bit Bitcoin private key range
-    mpz_t range_start, range_end;
+    mpz_t range_start, range_end, range_size, chunk_size;
     mpz_init_set_str(range_start, "8000000000000000000000000000000000000000", 16);
     mpz_init_set_str(range_end, "ffffffffffffffffffffffffffffffffffffffff", 16);
+    mpz_init(range_size);
+    mpz_init(chunk_size);
     
     printf("Range start: ");
     mpz_out_str(stdout, 16, range_start);
     printf("\nRange end:   ");
     mpz_out_str(stdout, 16, range_end);
+    printf("\n\n");
+    
+    // Calculer la taille de la plage totale
+    mpz_sub(range_size, range_end, range_start);
+    mpz_add_ui(range_size, range_size, 1);
+    
+    // Diviser la plage en chunks pour chaque thread
+    mpz_cdiv_q_ui(chunk_size, range_size, NUM_THREADS);
+    
+    printf("Total range size: ");
+    mpz_out_str(stdout, 16, range_size);
+    printf("\nChunk size per thread: ");
+    mpz_out_str(stdout, 16, chunk_size);
     printf("\n\n");
     
     pthread_t threads[NUM_THREADS];
@@ -215,8 +200,20 @@ int main() {
     
     // Create threads
     for (int i = 0; i < NUM_THREADS; i++) {
-        mpz_init_set(args[i].range_start, range_start);
-        mpz_init_set(args[i].range_end, range_end);
+        mpz_init(args[i].range_start);
+        mpz_init(args[i].range_end);
+        
+        // Calculer le début et la fin pour ce thread
+        mpz_mul_ui(args[i].range_start, chunk_size, i);
+        mpz_add(args[i].range_start, args[i].range_start, range_start);
+        
+        mpz_add(args[i].range_end, args[i].range_start, chunk_size);
+        mpz_sub_ui(args[i].range_end, args[i].range_end, 1);
+        
+        // Le dernier thread va jusqu'à la fin
+        if (i == NUM_THREADS - 1) {
+            mpz_set(args[i].range_end, range_end);
+        }
         
         args[i].thread_id = i;
         args[i].checked = &checked;
@@ -224,7 +221,11 @@ int main() {
         args[i].mutex = &mutex;
         args[i].found_complete = &found_complete;
         
-        printf("Thread %d: Starting with random search in range\n", i);
+        printf("Thread %d: Range from ", i);
+        mpz_out_str(stdout, 16, args[i].range_start);
+        printf(" to ");
+        mpz_out_str(stdout, 16, args[i].range_end);
+        printf("\n");
         
         pthread_create(&threads[i], NULL, search_thread, &args[i]);
     }
@@ -246,7 +247,7 @@ int main() {
         printf("La clé COMPLÈTE a été trouvée!\n");
         printf("Les résultats ont été sauvegardés dans BINGO.TXT\n");
     } else {
-        printf("🏁 Search Complete (interrupted)\n");
+        printf("🏁 Search Complete (range exhausted)\n");
     }
     
     printf("========================================\n");
@@ -265,6 +266,8 @@ int main() {
     }
     mpz_clear(range_start);
     mpz_clear(range_end);
+    mpz_clear(range_size);
+    mpz_clear(chunk_size);
     
     pthread_mutex_destroy(&mutex);
     
