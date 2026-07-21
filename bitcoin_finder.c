@@ -35,6 +35,45 @@ void bytes_to_hex(unsigned char *bytes, int len, char *hex) {
     hex[2*len] = '\0';
 }
 
+// Fonction pour générer un nombre aléatoire dans une plage VALIDE
+void generate_random_in_range(mpz_t result, mpz_t range_start, mpz_t range_end) {
+    mpz_t range_size;
+    mpz_init(range_size);
+    
+    // Calculer la taille de la plage: range_end - range_start
+    mpz_sub(range_size, range_end, range_start);
+    
+    // Générer un nombre aléatoire jusqu'à la taille de la plage
+    mpz_t random;
+    mpz_init(random);
+    
+    // Utiliser /dev/urandom pour plus d'aléatoire
+    FILE *fp = fopen("/dev/urandom", "r");
+    if (fp == NULL) {
+        perror("Erreur: impossible d'ouvrir /dev/urandom");
+        mpz_clear(random);
+        mpz_clear(range_size);
+        return;
+    }
+    
+    unsigned char random_bytes[32];
+    fread(random_bytes, 1, 32, fp);
+    fclose(fp);
+    
+    // Importer les bytes aléatoires dans mpz
+    mpz_import(random, 32, -1, 1, -1, 0, random_bytes);
+    
+    // Réduire au modulo de la taille de la plage
+    mpz_mod(random, random, range_size);
+    
+    // result = range_start + random
+    // Cela garantit que result est toujours >= range_start ET < range_end
+    mpz_add(result, range_start, random);
+    
+    mpz_clear(random);
+    mpz_clear(range_size);
+}
+
 // Fonction pour sauvegarder le résultat dans BINGO.TXT
 void save_result(const char *privkey_hex, const char *pubkey_hex, int match_len) {
     FILE *file = fopen("BINGO.TXT", "w");
@@ -65,13 +104,16 @@ void *search_thread(void *args) {
     secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY | SECP256K1_CONTEXT_SIGN);
     
     mpz_t current;
-    mpz_init_set(current, targs->range_start);
+    mpz_init(current);
     
     unsigned long local_checked = 0;
     time_t start_time = time(NULL);
     
-    // Recherche séquentielle dans la plage assignée
-    while (mpz_cmp(current, targs->range_end) <= 0 && !*targs->found_complete) {
+    // Recherche aléatoire infinie dans la plage
+    while (!*targs->found_complete) {
+        // Générer un nombre aléatoire dans la plage
+        generate_random_in_range(current, targs->range_start, targs->range_end);
+        
         // Convert mpz to bytes for secp256k1 (32 bytes = 256 bits)
         unsigned char privkey_bytes[32];
         memset(privkey_bytes, 0, 32);
@@ -79,67 +121,58 @@ void *search_thread(void *args) {
         size_t count;
         mpz_export(privkey_bytes, &count, -1, 1, -1, 0, current);
         
-        // IMPORTANT: S'assurer que le nombre utilise exactement 32 bytes
-        // Si count < 32, mpz_export place les bytes à la fin et laisse des zéros au début
-        // On doit les déplacer correctement (big-endian)
+        // Pad with zeros if needed (big-endian)
         if (count < 32) {
             memmove(privkey_bytes + (32 - count), privkey_bytes, count);
             memset(privkey_bytes, 0, 32 - count);
         }
         
-        // Vérifier que le nombre reste dans la plage valide (>= 0x80000000000...)
-        // En pratique, si on itère correctement dans la plage, ça ne devrait pas arriver
-        unsigned char test_byte = privkey_bytes[0];
-        if (test_byte >= 0x80) {
-            // Generate public key using secp256k1
-            secp256k1_pubkey pubkey;
-            if (secp256k1_ec_pubkey_create(ctx, &pubkey, privkey_bytes)) {
-                unsigned char pubkey_bytes[33];
-                size_t pubkey_len = 33;
-                secp256k1_ec_pubkey_serialize(ctx, pubkey_bytes, &pubkey_len, &pubkey, SECP256K1_EC_COMPRESSED);
+        // Generate public key using secp256k1
+        secp256k1_pubkey pubkey;
+        if (secp256k1_ec_pubkey_create(ctx, &pubkey, privkey_bytes)) {
+            unsigned char pubkey_bytes[33];
+            size_t pubkey_len = 33;
+            secp256k1_ec_pubkey_serialize(ctx, pubkey_bytes, &pubkey_len, &pubkey, SECP256K1_EC_COMPRESSED);
+            
+            // Convert to hex
+            char pubkey_hex[67];
+            bytes_to_hex(pubkey_bytes, 33, pubkey_hex);
+            
+            // Check for prefix match
+            int match_len = 0;
+            for (int i = 0; i < 66 && TARGET_PUBKEY[i] && pubkey_hex[i]; i++) {
+                if (TARGET_PUBKEY[i] == pubkey_hex[i]) {
+                    match_len++;
+                } else {
+                    break;
+                }
+            }
+            
+            if (match_len >= 5) {
+                char privkey_hex[65];
+                bytes_to_hex(privkey_bytes, 32, privkey_hex);
                 
-                // Convert to hex
-                char pubkey_hex[67];
-                bytes_to_hex(pubkey_bytes, 33, pubkey_hex);
+                printf("✅ FOUND! Match Length: %d chars\n", match_len);
+                printf("   Private Key: %s\n", privkey_hex);
+                printf("   Public Key:  %s\n", pubkey_hex);
+                printf("   Target:      %s\n", TARGET_PUBKEY);
+                printf("   Matching:    %.*s\n\n", match_len, pubkey_hex);
                 
-                // Check for prefix match
-                int match_len = 0;
-                for (int i = 0; i < 66 && TARGET_PUBKEY[i] && pubkey_hex[i]; i++) {
-                    if (TARGET_PUBKEY[i] == pubkey_hex[i]) {
-                        match_len++;
-                    } else {
-                        break;
-                    }
+                pthread_mutex_lock(targs->mutex);
+                (*targs->found)++;
+                
+                // Si c'est une correspondance COMPLÈTE (66 caractères)
+                if (match_len == 66) {
+                    printf("🎉🎉🎉 CORRESPONDANCE COMPLÈTE TROUVÉE! 🎉🎉🎉\n");
+                    save_result(privkey_hex, pubkey_hex, match_len);
+                    *targs->found_complete = 1;
+                    printf("\n✅ Résultat sauvegardé dans BINGO.TXT\n");
                 }
                 
-                if (match_len >= 5) {
-                    char privkey_hex[65];
-                    bytes_to_hex(privkey_bytes, 32, privkey_hex);
-                    
-                    printf("✅ FOUND! Match Length: %d chars\n", match_len);
-                    printf("   Private Key: %s\n", privkey_hex);
-                    printf("   Public Key:  %s\n", pubkey_hex);
-                    printf("   Target:      %s\n", TARGET_PUBKEY);
-                    printf("   Matching:    %.*s\n\n", match_len, pubkey_hex);
-                    
-                    pthread_mutex_lock(targs->mutex);
-                    (*targs->found)++;
-                    
-                    // Si c'est une correspondance COMPLÈTE (66 caractères)
-                    if (match_len == 66) {
-                        printf("🎉🎉🎉 CORRESPONDANCE COMPLÈTE TROUVÉE! 🎉🎉🎉\n");
-                        save_result(privkey_hex, pubkey_hex, match_len);
-                        *targs->found_complete = 1;
-                        printf("\n✅ Résultat sauvegardé dans BINGO.TXT\n");
-                    }
-                    
-                    pthread_mutex_unlock(targs->mutex);
-                }
+                pthread_mutex_unlock(targs->mutex);
             }
         }
         
-        // Incrémenter pour la clé suivante
-        mpz_add_ui(current, current, 1);
         local_checked++;
         
         if (local_checked % CHUNK_SIZE == 0 && !*targs->found_complete) {
@@ -161,11 +194,11 @@ void *search_thread(void *args) {
 }
 
 int main() {
-    printf("🔍 Bitcoin Key Finder - C with GMP & secp256k1 (SEQUENTIAL SEARCH)\n");
+    printf("🔍 Bitcoin Key Finder - C with GMP & secp256k1 (RANDOM SEARCH)\n");
     printf("========================================\n");
     printf("Target Public Key: %s\n", TARGET_PUBKEY);
     printf("Range: 0x8000000000000000000000000000000000000000 to 0xffffffffffffffffffffffffffffffffffffffff\n");
-    printf("Search Mode: SEQUENTIAL (range divided per thread)\n");
+    printf("Search Mode: COMPLETELY RANDOM (but respects range)\n");
     printf("Min Prefix Match: 5 characters\n");
     printf("Threads: %d\n", NUM_THREADS);
     printf("========================================\n\n");
@@ -173,29 +206,14 @@ int main() {
     time_t start = time(NULL);
     
     // Initialize range - 160 bit Bitcoin private key range
-    mpz_t range_start, range_end, range_size, chunk_size;
+    mpz_t range_start, range_end;
     mpz_init_set_str(range_start, "8000000000000000000000000000000000000000", 16);
     mpz_init_set_str(range_end, "ffffffffffffffffffffffffffffffffffffffff", 16);
-    mpz_init(range_size);
-    mpz_init(chunk_size);
     
     printf("Range start: ");
     mpz_out_str(stdout, 16, range_start);
     printf("\nRange end:   ");
     mpz_out_str(stdout, 16, range_end);
-    printf("\n\n");
-    
-    // Calculer la taille de la plage totale
-    mpz_sub(range_size, range_end, range_start);
-    mpz_add_ui(range_size, range_size, 1);
-    
-    // Diviser la plage en chunks pour chaque thread
-    mpz_cdiv_q_ui(chunk_size, range_size, NUM_THREADS);
-    
-    printf("Total range size: ");
-    mpz_out_str(stdout, 16, range_size);
-    printf("\nChunk size per thread: ");
-    mpz_out_str(stdout, 16, chunk_size);
     printf("\n\n");
     
     pthread_t threads[NUM_THREADS];
@@ -207,20 +225,8 @@ int main() {
     
     // Create threads
     for (int i = 0; i < NUM_THREADS; i++) {
-        mpz_init(args[i].range_start);
-        mpz_init(args[i].range_end);
-        
-        // Calculer le début et la fin pour ce thread
-        mpz_mul_ui(args[i].range_start, chunk_size, i);
-        mpz_add(args[i].range_start, args[i].range_start, range_start);
-        
-        mpz_add(args[i].range_end, args[i].range_start, chunk_size);
-        mpz_sub_ui(args[i].range_end, args[i].range_end, 1);
-        
-        // Le dernier thread va jusqu'à la fin
-        if (i == NUM_THREADS - 1) {
-            mpz_set(args[i].range_end, range_end);
-        }
+        mpz_init_set(args[i].range_start, range_start);
+        mpz_init_set(args[i].range_end, range_end);
         
         args[i].thread_id = i;
         args[i].checked = &checked;
@@ -228,11 +234,7 @@ int main() {
         args[i].mutex = &mutex;
         args[i].found_complete = &found_complete;
         
-        printf("Thread %d: Range from ", i);
-        mpz_out_str(stdout, 16, args[i].range_start);
-        printf(" to ");
-        mpz_out_str(stdout, 16, args[i].range_end);
-        printf("\n");
+        printf("Thread %d: Starting with random search in range\n", i);
         
         pthread_create(&threads[i], NULL, search_thread, &args[i]);
     }
@@ -254,7 +256,7 @@ int main() {
         printf("La clé COMPLÈTE a été trouvée!\n");
         printf("Les résultats ont été sauvegardés dans BINGO.TXT\n");
     } else {
-        printf("🏁 Search Complete (range exhausted)\n");
+        printf("🏁 Search Complete (interrupted)\n");
     }
     
     printf("========================================\n");
@@ -273,8 +275,6 @@ int main() {
     }
     mpz_clear(range_start);
     mpz_clear(range_end);
-    mpz_clear(range_size);
-    mpz_clear(chunk_size);
     
     pthread_mutex_destroy(&mutex);
     
