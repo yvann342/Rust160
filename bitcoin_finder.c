@@ -79,55 +79,62 @@ void *search_thread(void *args) {
         size_t count;
         mpz_export(privkey_bytes, &count, -1, 1, -1, 0, current);
         
-        // Pad with zeros if needed (big-endian)
+        // IMPORTANT: S'assurer que le nombre utilise exactement 32 bytes
+        // Si count < 32, mpz_export place les bytes à la fin et laisse des zéros au début
+        // On doit les déplacer correctement (big-endian)
         if (count < 32) {
             memmove(privkey_bytes + (32 - count), privkey_bytes, count);
             memset(privkey_bytes, 0, 32 - count);
         }
         
-        // Generate public key using secp256k1
-        secp256k1_pubkey pubkey;
-        if (secp256k1_ec_pubkey_create(ctx, &pubkey, privkey_bytes)) {
-            unsigned char pubkey_bytes[33];
-            size_t pubkey_len = 33;
-            secp256k1_ec_pubkey_serialize(ctx, pubkey_bytes, &pubkey_len, &pubkey, SECP256K1_EC_COMPRESSED);
-            
-            // Convert to hex
-            char pubkey_hex[67];
-            bytes_to_hex(pubkey_bytes, 33, pubkey_hex);
-            
-            // Check for prefix match
-            int match_len = 0;
-            for (int i = 0; i < 66 && TARGET_PUBKEY[i] && pubkey_hex[i]; i++) {
-                if (TARGET_PUBKEY[i] == pubkey_hex[i]) {
-                    match_len++;
-                } else {
-                    break;
-                }
-            }
-            
-            if (match_len >= 5) {
-                char privkey_hex[65];
-                bytes_to_hex(privkey_bytes, 32, privkey_hex);
+        // Vérifier que le nombre reste dans la plage valide (>= 0x80000000000...)
+        // En pratique, si on itère correctement dans la plage, ça ne devrait pas arriver
+        unsigned char test_byte = privkey_bytes[0];
+        if (test_byte >= 0x80) {
+            // Generate public key using secp256k1
+            secp256k1_pubkey pubkey;
+            if (secp256k1_ec_pubkey_create(ctx, &pubkey, privkey_bytes)) {
+                unsigned char pubkey_bytes[33];
+                size_t pubkey_len = 33;
+                secp256k1_ec_pubkey_serialize(ctx, pubkey_bytes, &pubkey_len, &pubkey, SECP256K1_EC_COMPRESSED);
                 
-                printf("✅ FOUND! Match Length: %d chars\n", match_len);
-                printf("   Private Key: %s\n", privkey_hex);
-                printf("   Public Key:  %s\n", pubkey_hex);
-                printf("   Target:      %s\n", TARGET_PUBKEY);
-                printf("   Matching:    %.*s\n\n", match_len, pubkey_hex);
+                // Convert to hex
+                char pubkey_hex[67];
+                bytes_to_hex(pubkey_bytes, 33, pubkey_hex);
                 
-                pthread_mutex_lock(targs->mutex);
-                (*targs->found)++;
-                
-                // Si c'est une correspondance COMPLÈTE (66 caractères)
-                if (match_len == 66) {
-                    printf("🎉🎉🎉 CORRESPONDANCE COMPLÈTE TROUVÉE! 🎉🎉🎉\n");
-                    save_result(privkey_hex, pubkey_hex, match_len);
-                    *targs->found_complete = 1;
-                    printf("\n✅ Résultat sauvegardé dans BINGO.TXT\n");
+                // Check for prefix match
+                int match_len = 0;
+                for (int i = 0; i < 66 && TARGET_PUBKEY[i] && pubkey_hex[i]; i++) {
+                    if (TARGET_PUBKEY[i] == pubkey_hex[i]) {
+                        match_len++;
+                    } else {
+                        break;
+                    }
                 }
                 
-                pthread_mutex_unlock(targs->mutex);
+                if (match_len >= 5) {
+                    char privkey_hex[65];
+                    bytes_to_hex(privkey_bytes, 32, privkey_hex);
+                    
+                    printf("✅ FOUND! Match Length: %d chars\n", match_len);
+                    printf("   Private Key: %s\n", privkey_hex);
+                    printf("   Public Key:  %s\n", pubkey_hex);
+                    printf("   Target:      %s\n", TARGET_PUBKEY);
+                    printf("   Matching:    %.*s\n\n", match_len, pubkey_hex);
+                    
+                    pthread_mutex_lock(targs->mutex);
+                    (*targs->found)++;
+                    
+                    // Si c'est une correspondance COMPLÈTE (66 caractères)
+                    if (match_len == 66) {
+                        printf("🎉🎉🎉 CORRESPONDANCE COMPLÈTE TROUVÉE! 🎉🎉🎉\n");
+                        save_result(privkey_hex, pubkey_hex, match_len);
+                        *targs->found_complete = 1;
+                        printf("\n✅ Résultat sauvegardé dans BINGO.TXT\n");
+                    }
+                    
+                    pthread_mutex_unlock(targs->mutex);
+                }
             }
         }
         
